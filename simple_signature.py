@@ -26,7 +26,7 @@ def build_activation_commit(activations, K=128):
     flat_view = activations[0].view(-1)
     topk_indices = flat_view.abs().topk(K).indices
     topk_values = flat_view[topk_indices]
-    commit = ProofPoly.from_points_tensor(topk_indices.to(torch.int32), topk_values).to_bytes()
+    commit = ProofPoly.from_points(topk_indices.to(torch.int32), topk_values).to_bytes()
     return commit
 
 def main():
