@@ -6,7 +6,10 @@ from tqdm import tqdm
 from statistics import mean, median
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
-from toploc.commits import ProofPoly
+# Use the optimized C++ version from the main toploc library
+import sys
+sys.path.insert(0, '../')
+from toploc.poly import ProofPoly
 
 
 def parse_args():
@@ -31,7 +34,7 @@ TMEDIAN = 8
 TEXP = 90
 
 def check(activations: list[torch.Tensor], proof: list[str]) -> tuple[list[int], list[int], list[float], list[float]]:
-    from toploc.C.utils import get_fp_parts
+    from toploc.C.csrc.utils import get_fp_parts
     topk_intersections: list[int] = []
     exp_intersections: list[int] = []
     mant_err_means: list[float] = []
@@ -100,11 +103,17 @@ def main(args):
         polys = [[f.read(258) for _j in range(1 + args.max_decode_tokens // args.decode_batching_size)] for _ in range(len(outputs))]
     
 
+    # Configure for macOS compatibility
+    import os
+    os.environ["VLLM_CPU_KVCACHE_SPACE"] = "4"  # Use CPU for key-value cache
+    
     llm = LLM(
         model=args.validate_model_name,
         tensor_parallel_size=args.tp,
-        max_model_len=4096,
+        max_model_len=2048,  # Reduced for macOS
         dtype=args.dtype,
+        device="cpu",  # Explicitly use CPU on macOS
+        trust_remote_code=True,
     )
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
 

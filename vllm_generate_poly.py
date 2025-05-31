@@ -1,5 +1,8 @@
 from tqdm import tqdm
-from toploc.commits import ProofPoly
+# Use the optimized C++ version from the main toploc library
+import sys
+sys.path.insert(0, '../')
+from toploc.poly import ProofPoly
 from vllm import LLM, SamplingParams
 import torch
 import argparse
@@ -30,7 +33,7 @@ def build_activation_commit(activations: list[torch.Tensor], decode_batching_siz
     flat_view = activations[0].view(-1)
     topk_indices = flat_view.abs().topk(K).indices
     topk_values = flat_view[topk_indices]
-    commit = ProofPoly.from_points(topk_indices, topk_values).to_bytes()
+    commit = ProofPoly.from_points_tensor(topk_indices.to(torch.int32), topk_values).to_bytes()
     commits.append(commit)
 
     # Batched Decode
@@ -38,7 +41,7 @@ def build_activation_commit(activations: list[torch.Tensor], decode_batching_siz
         flat_view = torch.cat([i.view(-1) for i in activations[i: i + decode_batching_size]])
         topk_indices = flat_view.abs().topk(K).indices
         topk_values = flat_view[topk_indices]
-        commit = ProofPoly.from_points(topk_indices, topk_values).to_bytes()
+        commit = ProofPoly.from_points_tensor(topk_indices.to(torch.int32), topk_values).to_bytes()
         commits.append(commit)
         
     return commits
@@ -47,20 +50,38 @@ def main(args):
     if args.system_prompt != "None":
         raise NotImplementedError("System prompts are not yet supported.")
 
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, ignore_eos=True, max_tokens=args.max_decode_tokens + 1)
-    llm = LLM(
-        model=args.model_name,
-        tensor_parallel_size=args.tp,
-        max_model_len=4096,
-        enforce_eager=True,
-        dtype=args.dtype,
+    # Use transformers instead of vLLM
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
+    print("Using transformers for model loading...")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, 
+        trust_remote_code=True, 
+        torch_dtype=torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
     )
-    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
+    # Set up activation hook
     saved_activations = []
     def activation_saving_hook(module, input, output):
-        saved_activations.append(output[0].detach().clone().cpu())
-    saved_activations_handle = model.model.norm.register_forward_hook(activation_saving_hook)
+        if isinstance(output, tuple):
+            saved_activations.append(output[0].detach().clone().cpu())
+        else:
+            saved_activations.append(output.detach().clone().cpu())
+    
+    # Register hook on the final layer norm
+    if hasattr(model, 'model') and hasattr(model.model, 'norm'):
+        # Llama style
+        hook_handle = model.model.norm.register_forward_hook(activation_saving_hook)
+    elif hasattr(model, 'transformer') and hasattr(model.transformer, 'ln_f'):
+        # GPT-2 style
+        hook_handle = model.transformer.ln_f.register_forward_hook(activation_saving_hook)
+    else:
+        print("Warning: Could not find appropriate layer to hook.")
+        hook_handle = list(model.modules())[-2].register_forward_hook(activation_saving_hook)
 
     ds = load_dataset(args.dataset_name, split="train")
     prompts = [i['data'][0] for _, i in zip(range(args.n_samples), ds)]
@@ -70,17 +91,33 @@ def main(args):
 
     saved_commits = []
     outputs = []
+    
     for prompt in tqdm(prompts):
-        output = llm.generate([prompt], sampling_params)
-        input_ids = output[0].prompt_token_ids
-        output_ids = output[0].outputs[0].token_ids
-        output = torch.tensor([[*input_ids, *output_ids]])
-
+        # Tokenize
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+        input_ids = inputs["input_ids"]
+        
+        # Generate
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                max_new_tokens=args.max_decode_tokens,
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.95,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        
         outputs.append(output)
-
-        act_commit = build_activation_commit(saved_activations, args.decode_batching_size)
-        saved_commits.append(act_commit)
+        
+        # Build activation commit
+        if saved_activations:
+            act_commit = build_activation_commit(saved_activations, args.decode_batching_size)
+            saved_commits.append(act_commit)
         saved_activations = []
+
+    # Clean up
+    hook_handle.remove()
 
     torch.save(outputs, output_save_path)
     print(f"Saved outputs to {output_save_path}")
