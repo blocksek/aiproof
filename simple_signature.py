@@ -30,11 +30,23 @@ def build_activation_commit(activations, K=128):
     return commit
 
 def main():
+    # Set seeds for maximum determinism
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     model_name = "meta-llama/Llama-3.1-8B-Instruct"
     prompt = "how many r's in strawberry"
     
     print(f"Loading model: {model_name}")
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        trust_remote_code=True, 
+        torch_dtype=torch.bfloat16,
+        use_cache=False  # Disable KV cache for more determinism
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     
     if tokenizer.pad_token is None:
@@ -53,24 +65,28 @@ def main():
 
     print(f"Generating response for: '{prompt}'")
     
-    # Tokenize
+    # Tokenize with attention mask
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
     input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
     
     # Generate
     with torch.no_grad():
         output = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=50,
-            do_sample=True,
-            temperature=0.8,
-            top_p=0.95,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id
         )
     
     # Decode response
-    response = tokenizer.decode(output[0], skip_special_tokens=True)
-    print(f"Model response: {response}")
+    full_response = tokenizer.decode(output[0], skip_special_tokens=True)
+    # Extract just the generated part (after the prompt)
+    generated_text = full_response[len(prompt):].strip()
+    
+    print(f"Model response: {full_response}")
+    print(f"Generated text: {generated_text}")
     
     # Build signature
     if saved_activations:
