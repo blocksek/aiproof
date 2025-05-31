@@ -1,13 +1,15 @@
+# Core dependencies for toploc polyglot signatures
+torch==2.5.1
+transformers>=4.52.0
+datasets>=3.0.1
+
+# For validation and analysis
 pandas
 numpy
-matplotlib
-torch==2.5.1
-transformers==4.48.0
-datasets==3.0.1
-accelerate==1.0.1
-ipykernel
-fastapi==0.115.2
-uvicorn==0.32.0
-vllm==0.6.6.post1
-ninja
-pytest
+tqdm
+
+# Optional: for Hugging Face authentication
+huggingface_hub
+
+# Note: vLLM removed due to macOS compatibility issues
+# This implementation uses transformers instead for universal compatibility
